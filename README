@@ -1,0 +1,7 @@
+Tools to create compact and fully featured read-only wiki reader.
+
+1. wikiexport - Grab XML dump by accessing "Special:AllPages" and "Special:Export"
+2. wikishelve_create.pt - convert XML dump to Python's shelve, which can be on some compressed filesystem.
+3. wikishelve_server.py - serve strings from shelve to HTTP
+4. hacked_mediawiki - MediaWiki that fetches page and template sources from HTTP instead of database
+

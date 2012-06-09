@@ -1,0 +1,289 @@
+From 702a298df23afdb64c73406f8ab39dbe74ac390b Mon Sep 17 00:00:00 2001
+From: Vitaly _Vi Shukela <vi0oss@gmail.com>
+Date: Thu, 7 Jun 2012 16:12:03 +0300
+Subject: [PATCH] Make MediaWiki 1.19 fetch content from HTTP
+
+Set wgBaseDownloadUrl to some http://127.0.0.1:9876 and when
+you open index.php/Qqq it with download
+http://127.0.0.1:9876/Qqq
+http://127.0.0.1:9876/Template:Whatever
+instead of fetching content from database.
+
+Limitations:
+
+* No editing
+* No history
+* Hacky, no redlinks
+* Still requires "stub" database
+* No images
+---
+ includes/Article.php       |   10 ++++++
+ includes/EditPage.php      |   48 ++++++++++++++++++++---------
+ includes/Linker.php        |   14 +++++----
+ includes/Title.php         |    1 +
+ includes/WikiPage.php      |   71 ++++++++++++++++++++++++++++++++++++++++++++
+ includes/parser/Parser.php |    6 ++++
+ 6 files changed, 129 insertions(+), 21 deletions(-)
+
+diff --git a/includes/Article.php b/includes/Article.php
+index b07f309..fdc3a5c 100644
+--- a/includes/Article.php
++++ b/includes/Article.php
+@@ -294,6 +294,16 @@ class Article extends Page {
+ 	 * @return mixed string containing article contents, or false if null
+ 	 */
+ 	function fetchContent() {
++        if ($this->mPage->downloadedContent) {
++            wfDebug("Article fetchContent hack\n");
++
++            $this->mContent = $this->mPage->downloadedContent;
++            $this->mRevIdFetched = -1;
++		    $this->mContentLoaded = true;
++
++            return $this->mContent;
++        }
++
+ 		if ( $this->mContentLoaded ) {
+ 			return $this->mContent;
+ 		}
+diff --git a/includes/EditPage.php b/includes/EditPage.php
+index d00d911..aef5834 100644
+--- a/includes/EditPage.php
++++ b/includes/EditPage.php
+@@ -335,17 +335,28 @@ class EditPage {
+ 
+ 		wfProfileIn( __METHOD__."-business-end" );
+ 
+-		$this->isConflict = false;
+-		// css / js subpages of user pages get a special treatment
+-		$this->isCssJsSubpage       = $this->mTitle->isCssJsSubpage();
+-		$this->isCssSubpage         = $this->mTitle->isCssSubpage();
+-		$this->isJsSubpage          = $this->mTitle->isJsSubpage();
+-		$this->isWrongCaseCssJsPage = $this->isWrongCaseCssJsPage();
+-		$this->isNew                = !$this->mTitle->exists() || $this->section == 'new';
+-
+-		# Show applicable editing introductions
+-		if ( $this->formtype == 'initial' || $this->firsttime ) {
+-			$this->showIntro();
++        if ($this->getArticle()->getPage()->downloadedContent) {
++            $this->isConflict = false;
++            // css / js subpages of user pages get a special treatment
++            $this->isCssJsSubpage       = false;
++            $this->isCssSubpage         = false;
++            $this->isJsSubpage          = false;
++            $this->isWrongCaseCssJsPage = false;
++            $this->isNew                = false; 
++
++        } else {
++            $this->isConflict = false;
++            // css / js subpages of user pages get a special treatment
++            $this->isCssJsSubpage       = $this->mTitle->isCssJsSubpage();
++            $this->isCssSubpage         = $this->mTitle->isCssSubpage();
++            $this->isJsSubpage          = $this->mTitle->isJsSubpage();
++            $this->isWrongCaseCssJsPage = $this->isWrongCaseCssJsPage();
++            $this->isNew                = !$this->mTitle->exists() || $this->section == 'new';
++
++            # Show applicable editing introductions
++            if ( $this->formtype == 'initial' || $this->firsttime ) {
++                $this->showIntro();
++            }
+ 		}
+ 
+ 		# Attempt submission here.  This will check for edit conflicts,
+@@ -370,10 +381,14 @@ class EditPage {
+ 				wfProfileOut( __METHOD__ );
+ 				return;
+ 			}
+-			if ( !$this->mTitle->getArticleId() )
+-				wfRunHooks( 'EditFormPreloadText', array( &$this->textbox1, &$this->mTitle ) );
+-			else
+-				wfRunHooks( 'EditFormInitialText', array( $this ) );
++            if ($this->getArticle()->getPage()->downloadedContent) {
++                wfDebug("EditPage edit downloadedContent hack\n");
++            } else {
++                if ( !$this->mTitle->getArticleId())
++                    wfRunHooks( 'EditFormPreloadText', array( &$this->textbox1, &$this->mTitle ) );
++                else
++                    wfRunHooks( 'EditFormInitialText', array( $this ) );
++            }
+ 		}
+ 
+ 		$this->showEditForm();
+@@ -861,6 +876,9 @@ class EditPage {
+ 		if ( $this->section == 'new' ) {
+ 			return $this->getCurrentText();
+ 		}
++        if ($this->mArticle->getPage()->downloadedContent) {
++            return $this->mArticle->getPage()->downloadedContent;
++        }
+ 		$revision = $this->mArticle->getRevisionFetched();
+ 		if ( $revision === null ) {
+ 			return '';
+diff --git a/includes/Linker.php b/includes/Linker.php
+index 3691d04..3880280 100644
+--- a/includes/Linker.php
++++ b/includes/Linker.php
+@@ -174,6 +174,8 @@ class Linker {
+ 			return "<!-- ERROR -->$html";
+ 		}
+ 		$options = (array)$options;
++        $options = array_diff($options, array("broken")); # force blue links
++
+ 
+ 		$dummy = new DummyLinker; // dummy linker instance for bc on the hooks
+ 
+@@ -189,13 +191,13 @@ class Linker {
+ 
+ 		# If we don't know whether the page exists, let's find out.
+ 		wfProfileIn( __METHOD__ . '-checkPageExistence' );
+-		if ( !in_array( 'known', $options ) and !in_array( 'broken', $options ) ) {
+-			if ( $target->isKnown() ) {
++		#if ( !in_array( 'known', $options ) and !in_array( 'broken', $options ) ) {
++		#	if ( $target->isKnown() ) {
+ 				$options[] = 'known';
+-			} else {
+-				$options[] = 'broken';
+-			}
+-		}
++		#	} else {
++		#		$options[] = 'broken';
++		#	}
++		#}
+ 		wfProfileOut( __METHOD__ . '-checkPageExistence' );
+ 
+ 		$oldquery = array();
+diff --git a/includes/Title.php b/includes/Title.php
+index f3cf79d..8d9f2e4 100644
+--- a/includes/Title.php
++++ b/includes/Title.php
+@@ -4117,6 +4117,7 @@ class Title {
+ 	 * @return Bool
+ 	 */
+ 	public function exists() {
++        return true;
+ 		return $this->getArticleId() != 0;
+ 	}
+ 
+diff --git a/includes/WikiPage.php b/includes/WikiPage.php
+index acc9831..5a89c98 100644
+--- a/includes/WikiPage.php
++++ b/includes/WikiPage.php
+@@ -82,6 +82,8 @@ class WikiPage extends Page {
+ 	 */
+ 	public function __construct( Title $title ) {
+ 		$this->mTitle = $title;
++        $this->hackTriggered = false;
++        $this->downloadedContent = false;
+ 	}
+ 
+ 	/**
+@@ -206,6 +208,26 @@ class WikiPage extends Page {
+ 		return $row;
+ 	}
+ 
++    /**
++      * @return string if found, false if not
++      */
++    public static function downloadPageSource($title_string) {
++        wfDebug("WikiPage downloadPageSource $title_string\n");
++        global $wgBaseDownloadUrl;
++        $content = file_get_contents($wgBaseDownloadUrl . "/" . urlencode($title_string));
++        return $content;
++    }
++
++    public function checkForDownloadingHack ($title) {
++        if (! $this->hackTriggered ) {
++            $pn = $title->getPrefixedText();
++            $str = WikiPage::downloadPageSource($pn);
++
++            $this->downloadedContent = $str;
++            $this->hackTriggered = true;
++        }
++    }
++
+ 	/**
+ 	 * Fetch a page record matching the Title object's namespace and title
+ 	 * using a sanitized title string
+@@ -215,6 +237,36 @@ class WikiPage extends Page {
+ 	 * @return mixed Database result resource, or false on failure
+ 	 */
+ 	public function pageDataFromTitle( $dbr, $title ) {
++
++        $this->checkForDownloadingHack($title);
++
++
++        if ($this->downloadedContent) {
++            wfDebug("WikiPage pageDataFromTitle hack\n");
++            
++            $fakerow= new stdClass();
++
++            $arr = array(
++                'page_id' => -1,
++                'page_namespace' => $title->getNamespace(),
++                'page_title' => $title->getDBkey(),
++                'page_restrictions' => '',
++                'page_counter' => 1,
++                'page_is_redirect' => false,
++                'page_is_new' => false,
++                'page_random' => false,
++                'page_touched' => false,
++                'page_latest' => true,
++                'page_len' => -1,
++            );
++
++            foreach ($arr as $k=> $v) {
++                $fakerow->{$k} = $v;
++            }
++
++            return $fakerow;
++        }
++
+ 		return $this->pageData( $dbr, array(
+ 			'page_namespace' => $title->getNamespace(),
+ 			'page_title'     => $title->getDBkey() ) );
+@@ -372,6 +424,25 @@ class WikiPage extends Page {
+ 	 * This isn't necessary for all uses, so it's only done if needed.
+ 	 */
+ 	protected function loadLastEdit() {
++
++        $this->checkForDownloadingHack($this->mTitle);
++
++        if ( $this->downloadedContent ) {
++            wfDebug("WikiPage loadLastEdit hack\n");
++            $revision = new Revision( array(
++                'page'       => -1,
++                'comment'    => "fake revision",
++                'minor_edit' => false,
++                'text_id'    => -1,
++                'parent_id'  => -1,
++                'len'        => -1,
++                'sha1'       => null,
++                ) );
++
++            $this->setLastEdit ($revision);
++            return;
++        }
++
+ 		if ( $this->mLastRevision !== null ) {
+ 			return; // already loaded
+ 		}
+diff --git a/includes/parser/Parser.php b/includes/parser/Parser.php
+index 2abf1b9..e324f57 100644
+--- a/includes/parser/Parser.php
++++ b/includes/parser/Parser.php
+@@ -3447,6 +3447,12 @@ class Parser {
+ 	 * @return Array ( string or false, Title )
+ 	 */
+ 	function fetchTemplateAndTitle( $title ) {
++        $hackStr = WikiPage::downloadPageSource($title);
++        if ($hackStr) {
++            return array ($hackStr, $title);
++        }
++
++
+ 		$templateCb = $this->mOptions->getTemplateCallback(); # Defaults to Parser::statelessFetchTemplate()
+ 		$stuff = call_user_func( $templateCb, $title, $this );
+ 		$text = $stuff['text'];
+-- 
+1.7.8.5
+
